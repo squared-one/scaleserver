@@ -5,7 +5,12 @@ This is a simple server that reads weight values from a Gram Xtrem F scale conne
 ## Installation
 
 1. Clone the repository to your local machine.
-2. Install the required gems by running `bundle install` in the project directory.
+
+```
+git clone git@github.com:squared-one/scaleserver.git
+```
+
+2. Install the required gems by running `bundle install --path vendor/bundle` in the project directory.
 
 ## Usage
 

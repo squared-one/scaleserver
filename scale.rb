@@ -1,3 +1,4 @@
+require 'rubygems'
 require 'puma'
 require 'rack'
 require 'rack/handler/puma'
