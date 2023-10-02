@@ -10,7 +10,7 @@ sudo systemctl status scale.service
 
 # Install nginx
 sudo apt-get update
-sudo apt-get install nginx
+sudo apt-get install nginx -y
 sudo rm /etc/nginx/sites-enabled/default
 sudo cp nginx.conf /etc/nginx/sites-enabled/default
 sudo systemctl restart nginx

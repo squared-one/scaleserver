@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-User=pi
+User=scale
 WorkingDirectory=/home/scale/scaleserver
 ExecStart=/usr/local/bin/bundle exec puma ./scale.rb -b 0.0.0.0
 Restart=always
