@@ -13,6 +13,7 @@ data_bits = 8
 stop_bits = 1
 parity = SerialPort::NONE
 separator = "\r\n"
+number_of_measurements = 7
 
 def process_line(line)
     puts "Received line: #{line}"
@@ -32,7 +33,7 @@ app = Proc.new do |env|
     start_time = Time.now
 
     # Read weight values from serial port
-    10.times do
+    number_of_measurements.times do
         # Read a line from the serial port
         line = serial.gets(separator)
 
