@@ -47,7 +47,7 @@ app = Proc.new do |env|
                 weight_grams = (weight_kgt * 1000).to_i
 
                 # Store the weight value in the weights array
-                weights << weight_grams 
+                weights << weight_grams if weight_grams >=0 
             end
         rescue NoMethodError
         end
