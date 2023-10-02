@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 User=scale
 WorkingDirectory=/home/scale/scaleserver
-ExecStart=/usr/local/bin/bundle exec puma ./scale.rb -b 0.0.0.0
+ExecStart=/usr/local/bin/bundle exec puma ./scale.rb
 Restart=always
 
 [Install]
