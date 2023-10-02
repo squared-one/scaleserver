@@ -37,15 +37,18 @@ app = Proc.new do |env|
         line = serial.gets(separator)
 
         # Extract the weight value from the line if it contains the "kgT" pseudounit
-        if line.include?("kgT")
-            # Extract the weight value from the second column of the line
-            weight_kgt = line.split[1].to_f
+        begin
+            if line.include?("kgT")
+                # Extract the weight value from the second column of the line
+                weight_kgt = line.split[1].to_f
 
-            # Convert the weight value from kgT to grams
-            weight_grams = (weight_kgt * 1000).to_i
+                # Convert the weight value from kgT to grams
+                weight_grams = (weight_kgt * 1000).to_i
 
-            # Store the weight value in the weights array
-            weights << weight_grams 
+                # Store the weight value in the weights array
+                weights << weight_grams 
+            end
+        rescue NoMethodError
         end
     end
 
