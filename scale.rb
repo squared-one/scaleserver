@@ -15,19 +15,6 @@ parity = SerialPort::NONE
 separator = "\r\n"
 number_of_measurements = 7
 
-# Configure Puma server
-server_type = 'production'
-server_type = 'development'  if RUBY_PLATFORM =~ /darwin/
-
-case server_type
-when 'development'
-  PORT = 8000
-when 'production'
-  PORT = 80
-else
-  raise "Unknown server type: #{server_type}"
-end
-
 def process_line(line)
     puts "Received line: #{line}"
 end
@@ -92,7 +79,7 @@ app = Proc.new do |env|
 end
 
 # Start Puma server
-Rack::Handler::Puma.run(app, Port: PORT)
+Rack::Handler::Puma.run(app, Port: 8000)
 
 # Stop sending weight values from the scale and close the serial port
 serial.write("\u000200FFE10100000\u0003\r\n")

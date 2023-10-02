@@ -1,8 +1,17 @@
 #!/bin/bash
 
+# Install ScaleServer
 sudo rm /etc/systemd/system/scale.service 
 sudo cp scale.service /etc/systemd/system/scale.service
 sudo systemctl daemon-reload
 sudo systemctl enable scale.service
 sudo systemctl start scale.service
 sudo systemctl status scale.service
+
+# Install nginx
+sudo apt-get update
+sudo apt-get install nginx
+sudo rm /etc/nginx/sites-enabled/default
+sudo cp nginx.conf /etc/nginx/sites-enabled/default
+sudo systemctl restart nginx
+sudo systemctl status nginx
