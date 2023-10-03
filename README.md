@@ -22,7 +22,9 @@ bundle exec puma ./scale.rb -b 0.0.0.0
 
 This will start the server on port 8000 and bind it to the `0.0.0.0` IP address, which means it will be accessible from any network interface.
 
-To access the server, open a web browser and navigate to `http://localhost:8000/` in development or `http://squared-scale-pi-1.local:8000` in production. You should see an integer displayed in your browser.
+To access the server, open a web browser and navigate to `http://localhost:8000/` in development or `http://squared-scale-pi-1.local` in production. You should see an integer displayed in your browser.
+
+To calibrate the scale, navigate to `http://localhost:8000/calibrate` in development or `http://squared-scale-pi-1.local/calibrate` in production.
 
 ## Testing
 

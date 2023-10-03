@@ -25,57 +25,70 @@ serial.read_timeout = 1000
 
 # Define Rack application
 app = Proc.new do |env| 
-    weights =  []
+    case env['PATH_INFO']
+    when '/'
+        weights =  []
 
-    # Send command to scale to start sending weight values
-    serial.write("\u000200FFE10110000\u0003\r\n")
+        # Send command to scale to start sending weight values
+        serial.write("\u000200FFE10110000\u0003\r\n")
 
-    start_time = Time.now
+        start_time = Time.now
 
-    # Read weight values from serial port
-    number_of_measurements.times do
-        # Read a line from the serial port
-        line = serial.gets(separator)
+        # Read weight values from serial port
+        number_of_measurements.times do
+            # Read a line from the serial port
+            line = serial.gets(separator)
 
-        # Extract the weight value from the line if it contains the "kgT" pseudounit
-        begin
-            if line.include?("kgT")
-                # Extract the weight value from the second column of the line
-                weight_kgt = line.split[1].to_f
+            # Extract the weight value from the line if it contains the "kgT" pseudounit
+            begin
+                if line.include?("kgT")
+                    # Extract the weight value from the second column of the line
+                    weight_kgt = line.split[1].to_f
 
-                # Convert the weight value from kgT to grams
-                weight_grams = (weight_kgt * 1000).to_i
+                    # Convert the weight value from kgT to grams
+                    weight_grams = (weight_kgt * 1000).to_i
 
-                # Store the weight value in the weights array
-                weights << weight_grams if weight_grams >=0 
+                    # Store the weight value in the weights array
+                    weights << weight_grams if weight_grams >=0 
+                end
+            rescue NoMethodError
             end
-        rescue NoMethodError
         end
+
+        end_time = Time.now
+
+        # Stop sending weight values from the scale
+        serial.write("\u000200FFE10100000\u0003\r\n")
+
+        # Calculate the mean and standard deviation of the weight values
+        mean = weights.sum / weights.size.to_f
+        std_dev = Math.sqrt(weights.map { |w| (w - mean) ** 2 }.sum / weights.size)
+
+        # Identify outliers as values that are more than 3 standard deviations away from the mean
+        outliers = weights.select { |w| (w - mean).abs > 3 * std_dev }
+
+        # Remove outliers from the weights array
+        weights -= outliers
+
+        # Calculate the mean of the remaining weight values
+        mean = weights.sum / weights.size.to_f
+
+        # The closest value to the real weight is the weight value that is closest to the mean
+        closest_value = weights.min_by { |w| (w - mean).abs }
+
+        # Return the closest weight value as a plain text response
+        ['200', {'Content-Type' => 'text/plain'}, [closest_value.to_s]]
+    when '/calibrate'
+
+        # Send command to scale to calibrate
+        serial.write("\u000200FFE01050000\u0003\r\n")
+
+        # Return a success message as a plain text response
+        ['200', {'Content-Type' => 'text/plain'}, ['Calibration started']]
+
+    else
+        ['404', {'Content-Type' => 'text/plain'}, ['Not found']]
     end
-
-    end_time = Time.now
-
-    # Stop sending weight values from the scale
-    serial.write("\u000200FFE10100000\u0003\r\n")
-
-    # Calculate the mean and standard deviation of the weight values
-    mean = weights.sum / weights.size.to_f
-    std_dev = Math.sqrt(weights.map { |w| (w - mean) ** 2 }.sum / weights.size)
-
-    # Identify outliers as values that are more than 3 standard deviations away from the mean
-    outliers = weights.select { |w| (w - mean).abs > 3 * std_dev }
-
-    # Remove outliers from the weights array
-    weights -= outliers
-
-    # Calculate the mean of the remaining weight values
-    mean = weights.sum / weights.size.to_f
-
-    # The closest value to the real weight is the weight value that is closest to the mean
-    closest_value = weights.min_by { |w| (w - mean).abs }
-
-    # Return the closest weight value as a plain text response
-    ['200', {'Content-Type' => 'text/plain'}, [closest_value.to_s]]
 end
 
 # Start Puma server
