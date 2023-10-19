@@ -96,10 +96,12 @@ When the `port` variable is set to `'test'`, the server will serve a random inte
 
 11. To access the Scale Server, open a web browser and navigate to `http://squared-scale-pi-1.local:8000/`. You should see an integer displayed in your browser.
 
+## Known issues
+
+1. Sometimes Permission denied for ttyUSB0 occurs, it is necessary to fix permissions for the user running the scaleserver, opt for a permanent solution
+2. If the scale starts with some weight on it, it can then read negative values which breaks the ruby app. In that case, just visit `/calibrate` and reset the scale to correct zero value
+
 ## License
 
 This project is licensed under the MIT License. See the `LICENSE` file for details.
 
-## License
-
-This project is licensed under the MIT License. See the `LICENSE` file for details.
