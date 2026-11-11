@@ -1,99 +1,54 @@
 require 'rubygems'
+require 'json'
 require 'puma'
 require 'rack'
 require 'rack/handler/puma'
-require 'serialport'
-require 'stringio'
+require_relative 'scale_reader'
 
-# Configure serial port
-port = '/dev/ttyUSB0' # Replace with the path to your serial port
-port = '/dev/tty.usbserial-FTC2F1C1' if RUBY_PLATFORM =~ /darwin/
-baud_rate = 9600
-data_bits = 8
-stop_bits = 1
-parity = SerialPort::NONE
-separator = "\r\n"
-number_of_measurements = 7
+# SCALE_PORT: serial device path, "tcp://host:port" (Wi-Fi module) or "test"
+default_port = RUBY_PLATFORM =~ /darwin/ ? '/dev/tty.usbserial-FTC2F1C1' : '/dev/ttyUSB0'
+port = ENV.fetch('SCALE_PORT', default_port)
+baud_rate = ENV.fetch('SCALE_BAUD', '9600').to_i
+http_port = ENV.fetch('PORT', '8000').to_i
 
-def process_line(line)
-    puts "Received line: #{line}"
-end
-
-# Serve integer from serial input on root path
-serial = SerialPort.new(port, baud_rate, data_bits, stop_bits, parity)
-serial.read_timeout = 1000
-
-# Define Rack application
-app = Proc.new do |env| 
-    case env['PATH_INFO']
-    when '/'
-        weights =  []
-
-        # Send command to scale to start sending weight values
-        serial.write("\u000200FFE10110000\u0003\r\n")
-
-        start_time = Time.now
-
-        # Read weight values from serial port
-        number_of_measurements.times do
-            # Read a line from the serial port
-            line = serial.gets(separator)
-
-            # Extract the weight value from the line if it contains the "kgT" pseudounit
-            begin
-                if line.include?("kgT")
-                    # Extract the weight value from the second column of the line
-                    weight_kgt = line.split[1].to_f
-
-                    # Convert the weight value from kgT to grams
-                    weight_grams = (weight_kgt * 1000).to_i
-
-                    # Store the weight value in the weights array
-                    weights << weight_grams if weight_grams >=0 
-                end
-            rescue NoMethodError
-            end
-        end
-
-        end_time = Time.now
-
-        # Stop sending weight values from the scale
-        serial.write("\u000200FFE10100000\u0003\r\n")
-
-        # Calculate the mean and standard deviation of the weight values
-        mean = weights.sum / weights.size.to_f
-        std_dev = Math.sqrt(weights.map { |w| (w - mean) ** 2 }.sum / weights.size)
-
-        # Identify outliers as values that are more than 3 standard deviations away from the mean
-        outliers = weights.select { |w| (w - mean).abs > 3 * std_dev }
-
-        # Remove outliers from the weights array
-        weights -= outliers
-
-        # Calculate the mean of the remaining weight values
-        mean = weights.sum / weights.size.to_f
-
-        # The closest value to the real weight is the weight value that is closest to the mean
-        closest_value = weights.min_by { |w| (w - mean).abs }
-
-        # Return the closest weight value as a plain text response
-        ['200', {'Content-Type' => 'text/plain'}, [closest_value.to_s]]
-    when '/calibrate'
-
-        # Send command to scale to calibrate
-        serial.write("\u000200FFE01050000\u0003\r\n")
-
-        # Return a success message as a plain text response
-        ['200', {'Content-Type' => 'text/plain'}, ['Calibration started']]
-
-    else
-        ['404', {'Content-Type' => 'text/plain'}, ['Not found']]
+io_factory =
+  case port
+  when 'test'
+    -> { FakeScaleIO.new }
+  when %r{\Atcp://([^:/]+):(\d+)}
+    host = Regexp.last_match(1)
+    tcp_port = Regexp.last_match(2).to_i
+    -> { TcpScaleIO.new(host, tcp_port) }
+  else
+    require 'serialport'
+    lambda do
+      serial = SerialPort.new(port, baud_rate, 8, 1, SerialPort::NONE)
+      serial.read_timeout = 1000
+      serial
     end
+  end
+
+reader = ScaleReader.new(io_factory: io_factory).start
+
+text = lambda do |state|
+  body = state[:status] == :ok ? state[:grams] : state[:message]
+  [state[:status] == :ok ? '200' : '503', { 'Content-Type' => 'text/plain; charset=utf-8' }, [body.to_s]]
+end
+json = ->(state) { ['200', { 'Content-Type' => 'application/json' }, [JSON.generate(state)]] }
+
+app = proc do |env|
+  case env['PATH_INFO']
+  when '/'      then text.call(reader.weight)             # plain grams, used by COMMAND-SCALE
+  when '/live'  then json.call(reader.current_state)      # immediate state for the picking panel
+  when '/weigh' then json.call(reader.weight)             # waits for a stable weight
+  when '/zero', '/calibrate'
+    state = reader.zero!
+    env['PATH_INFO'] == '/calibrate' ? text.call(state) : json.call(state)
+  when '/status' then ['200', { 'Content-Type' => 'application/json' }, [JSON.pretty_generate(reader.status)]]
+  else ['404', { 'Content-Type' => 'text/plain' }, ['Not found']]
+  end
 end
 
-# Start Puma server
-Rack::Handler::Puma.run(app, Port: 8000)
+at_exit { reader.stop }
 
-# Stop sending weight values from the scale and close the serial port
-serial.write("\u000200FFE10100000\u0003\r\n")
-serial.close
+Rack::Handler::Puma.run(app, Port: http_port, Host: ENV.fetch('BIND', '127.0.0.1'), Threads: '0:4')
