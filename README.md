@@ -98,11 +98,27 @@ When the `port` variable is set to `'test'`, the server will serve a random inte
 
 ## Endpoints
 
-- `GET /` – weight in grams as plain text. `503` with a Czech message when the scale sends no data, is not stable, or shows a negative weight.
-- `GET /zero` (alias `/calibrate`) – with an empty scale: sends the zero command to the scale and stores a software zero offset in `zero_offset.json`. Works even when the scale itself refuses to re-zero because its zero drifted.
-- `GET /status` – JSON for diagnostics (last raw line, readings window, offset, last error).
+- `GET /` – stable weight in grams as plain text (used by the `COMMAND-SCALE` barcode). `503` with a Czech message when the scale sends no data, is below zero / in error, is not stable, or shows a negative weight.
+- `GET /live` – immediate state as JSON (`{"status":"ok","grams":1235}` or `{"status":"error","reason":"no_weight","message":"…"}`), polled by the scale panel in Squared picking.
+- `GET /weigh` – like `/`, as JSON.
+- `POST /zero` (legacy `GET /calibrate`) – sends the zero command and checks the scale reads 0 g. The scale refuses when the zero drifted outside its zero range; then only a power cycle with an empty platform helps.
+- `GET /status` – JSON for diagnostics (last raw frame, readings window, last error).
 
-A background thread keeps the scale in continuous mode and remembers the last readings, so `/` answers immediately. The value is the median of the last 5 readings, only when they differ by at most 4 g.
+A background thread keeps the scale in continuous mode (~10 frames/s) and remembers the last readings, so requests answer immediately. The weight is the median of the last 5 readings, only when they differ by at most 10 g.
+
+## Scale frames (Gram Xtrem F, observed 2026-11-11)
+
+```
+STX 0100r01071AW   1.025kgT   0.000kgS01062 ETX CRLF   weight (gross, kgT)
+STX 0100r010002487C ETX CRLF                           no weight: below zero or error state
+STX 0100e101101054 ETX CRLF                            ack of a command
+```
+
+When only the short `r010002` frame comes, the scale's zero drifted below the range in which it reports weight. The zero command is acknowledged but does not fix it; unplug the scale for 10 s with an empty platform.
+
+## Deployment on the dispatch PC
+
+`ssh expedice` (192.168.1.155, user `squared-expedice`), code in `~/squared-scale`, service `scale` runs `bundle exec puma ./scale.rb` as root. Copy `scale.rb` + `scale_reader.rb`, then `ssh -t expedice sudo ~/squared-scale/deploy-sudo.sh`.
 
 ## Configuration
 
