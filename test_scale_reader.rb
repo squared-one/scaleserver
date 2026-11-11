@@ -1,12 +1,12 @@
 require 'minitest/autorun'
-require 'tmpdir'
 require_relative 'scale_reader'
 
 class ScriptedIO
   attr_reader :writes
 
-  def initialize(lines)
+  def initialize(lines, repeat_last: false)
     @lines = lines.dup
+    @repeat_last = repeat_last
     @writes = []
   end
 
@@ -16,75 +16,82 @@ class ScriptedIO
 
   def gets(_sep = nil)
     sleep 0.01
-    @lines.shift || (sleep(0.05) && nil)
+    line = @lines.size > 1 || !@repeat_last ? @lines.shift : @lines.first
+    line || (sleep(0.05) && nil)
   end
 
   def close; end
 end
 
 class ScaleReaderTest < Minitest::Test
-  def reader_for(lines, **opts)
-    io = ScriptedIO.new(lines)
-    reader = ScaleReader.new(io_factory: -> { io }, logger: nil, **opts).start
+  NO_WEIGHT = "\u00020100r010002487C\u0003\r\n".freeze
+
+  def frame(kg)
+    format("\u00020100r01071AW %7.3fkgT   0.000kgS01062\u0003\r\n", kg)
+  end
+
+  def reader_for(lines, repeat_last: false)
+    io = ScriptedIO.new(lines, repeat_last: repeat_last)
+    reader = ScaleReader.new(io_factory: -> { io }, logger: nil).start
     [reader, io]
   end
 
-  def test_parse_grams
-    assert_equal 123, ScaleReader.parse_grams("ST,GS  0.123 kgT\r\n")
-    assert_equal(-4, ScaleReader.parse_grams("-0.004kgT\r\n"))
-    assert_equal(-4, ScaleReader.parse_grams("ST,GS - 0.004 kgT\r\n"))
-    assert_equal 1500, ScaleReader.parse_grams('1,500 kg')
-    assert_nil ScaleReader.parse_grams('garbage')
-    assert_nil ScaleReader.parse_grams(nil)
+  # Real frames captured from the scale on 2026-11-11
+  def test_parse_real_frames
+    assert_equal 80, ScaleReader.parse("\u00020100r01071AW   0.080kgT   0.000kgS0106C\u0003\r\n")
+    assert_equal 4565, ScaleReader.parse("\u00020100r01071AW   4.565kgT   0.000kgS01066\u0003")
+    assert_equal(-85, ScaleReader.parse("\u00020100r01071AW  -0.085kgT   0.000kgS01064\u0003"))
+    assert_equal 0, ScaleReader.parse("\u00020100r01071AW   0.000kgT   0.000kgS01561\u0003")
+    assert_equal :no_weight, ScaleReader.parse(NO_WEIGHT)
+    assert_nil ScaleReader.parse("\u00020100e101101054\u0003")
+    assert_nil ScaleReader.parse(nil)
   end
 
   def test_returns_median_of_stable_window
-    reader, io = reader_for(['0.500 kgT', '0.501 kgT', '0.499 kgT', '0.500 kgT', '0.501 kgT'])
-    assert_equal [:ok, 500], reader.weight
+    reader, io = reader_for([frame(0.500), frame(0.505), frame(0.500), frame(0.500), frame(0.505)])
+    assert_equal({ status: :ok, grams: 500 }, reader.weight)
     assert_includes io.writes, ScaleReader::CMD_STREAM_ON
   end
 
   def test_small_negative_is_zero
-    reader, = reader_for(['-0.001 kgT'] * 5)
-    assert_equal [:ok, 0], reader.weight
+    reader, = reader_for([frame(-0.005)] * 5)
+    assert_equal({ status: :ok, grams: 0 }, reader.weight)
   end
 
-  def test_large_negative_is_error_not_crash
-    reader, = reader_for(['-0.050 kgT'] * 5)
-    status, message = reader.weight(timeout: 0.5)
-    assert_equal :error, status
-    assert_match(/-50 g/, message)
+  def test_large_negative_is_error
+    reader, = reader_for([frame(-0.085)] * 5)
+    state = reader.weight(timeout: 0.5)
+    assert_equal :negative, state[:reason]
+    assert_match(/-85 g/, state[:message])
   end
 
-  def test_no_data_is_error_not_crash
+  def test_no_weight_frame_is_explained
+    reader, = reader_for([frame(0.1)] * 5 + [NO_WEIGHT], repeat_last: true)
+    state = reader.weight(timeout: 0.5)
+    assert_equal :no_weight, state[:reason]
+    assert_match(/ze zásuvky/, state[:message])
+  end
+
+  def test_no_data_is_error
     reader, = reader_for([])
-    status, message = reader.weight(timeout: 0.3)
-    assert_equal :error, status
-    assert_match(/neposílá data/, message)
+    assert_equal :no_data, reader.weight(timeout: 0.3)[:reason]
   end
 
   def test_unstable_is_error
-    reader, = reader_for(['0.100 kgT', '0.300 kgT', '0.200 kgT', '0.500 kgT', '0.050 kgT'])
-    status, message = reader.weight(timeout: 0.3)
-    assert_equal :error, status
-    assert_match(/ustálená/, message)
+    reader, = reader_for([frame(0.1), frame(0.3), frame(0.2), frame(0.5), frame(0.05)])
+    assert_equal :unstable, reader.weight(timeout: 0.3)[:reason]
   end
 
-  def test_software_zero_compensates_drift
-    path = File.join(Dir.mktmpdir, 'offset.json')
-    reader, io = reader_for(['-0.050 kgT'] * 200, offset_file: path)
+  def test_zero_sends_command_and_confirms
+    reader, io = reader_for([frame(0)], repeat_last: true)
     sleep 0.1
-    assert_equal [:ok, -50], reader.zero!
+    assert_equal({ status: :ok, grams: 0 }, reader.zero!)
     assert_includes io.writes, ScaleReader::CMD_ZERO
-    assert_equal [:ok, 0], reader.weight
-    assert_equal(-50, JSON.parse(File.read(path))['offset_grams'])
   end
 
-  def test_zero_refused_with_load
-    reader, = reader_for(['1.000 kgT'] * 200)
-    sleep 0.1
-    status, = reader.zero!
-    assert_equal :error, status
+  def test_zero_with_load_is_refused
+    reader, = reader_for([frame(1.0)], repeat_last: true)
+    assert_equal :not_empty, reader.zero![:reason]
   end
 
   def test_reconnects_after_io_error
@@ -93,9 +100,9 @@ class ScaleReaderTest < Minitest::Test
       calls += 1
       raise Errno::ENOENT, '/dev/ttyUSB0' if calls == 1
 
-      ScriptedIO.new(['0.200 kgT'] * 10)
+      ScriptedIO.new([frame(0.2)] * 10)
     end
     reader = ScaleReader.new(io_factory: factory, logger: nil).start
-    assert_equal [:ok, 200], reader.weight(timeout: 4)
+    assert_equal({ status: :ok, grams: 200 }, reader.weight(timeout: 4))
   end
 end

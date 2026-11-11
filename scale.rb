@@ -10,7 +10,6 @@ default_port = RUBY_PLATFORM =~ /darwin/ ? '/dev/tty.usbserial-FTC2F1C1' : '/dev
 port = ENV.fetch('SCALE_PORT', default_port)
 baud_rate = ENV.fetch('SCALE_BAUD', '9600').to_i
 http_port = ENV.fetch('PORT', '8000').to_i
-offset_file = ENV.fetch('SCALE_OFFSET_FILE', File.join(__dir__, 'zero_offset.json'))
 
 io_factory =
   case port
@@ -29,26 +28,24 @@ io_factory =
     end
   end
 
-reader = ScaleReader.new(io_factory: io_factory, offset_file: offset_file).start
+reader = ScaleReader.new(io_factory: io_factory).start
 
-text = ->(code, body) { [code.to_s, { 'Content-Type' => 'text/plain; charset=utf-8' }, [body.to_s]] }
+text = lambda do |state|
+  body = state[:status] == :ok ? state[:grams] : state[:message]
+  [state[:status] == :ok ? '200' : '503', { 'Content-Type' => 'text/plain; charset=utf-8' }, [body.to_s]]
+end
+json = ->(state) { ['200', { 'Content-Type' => 'application/json' }, [JSON.generate(state)]] }
 
 app = proc do |env|
   case env['PATH_INFO']
-  when '/'
-    status, value = reader.weight
-    status == :ok ? text.call(200, value) : text.call(503, value)
+  when '/'      then text.call(reader.weight)             # plain grams, used by COMMAND-SCALE
+  when '/live'  then json.call(reader.current_state)      # immediate state for the picking panel
+  when '/weigh' then json.call(reader.weight)             # waits for a stable weight
   when '/zero', '/calibrate'
-    status, value = reader.zero!
-    if status == :ok
-      text.call(200, "Vynulováno, posun nuly #{value} g.")
-    else
-      text.call(503, value)
-    end
-  when '/status'
-    ['200', { 'Content-Type' => 'application/json' }, [JSON.pretty_generate(reader.status)]]
-  else
-    text.call(404, 'Not found')
+    state = reader.zero!
+    env['PATH_INFO'] == '/calibrate' ? text.call(state) : json.call(state)
+  when '/status' then ['200', { 'Content-Type' => 'application/json' }, [JSON.pretty_generate(reader.status)]]
+  else ['404', { 'Content-Type' => 'text/plain' }, ['Not found']]
   end
 end
 

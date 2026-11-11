@@ -1,9 +1,15 @@
-require 'json'
 require 'socket'
+require 'io/wait'
 
 # Reads a Gram Xtrem scale continuously in a background thread and keeps
 # the latest readings in memory, so HTTP requests answer immediately
 # instead of opening a measurement window on every request.
+#
+# Frames observed on a Gram Xtrem F (RS-232, 9600 8N1, ~10 frames/s):
+#   STX "0100r01071AW   1.025kgT   0.000kgS01062" ETX CRLF   weight (gross kgT)
+#   STX "0100r010002487C" ETX CRLF                           no weight: below zero
+#                                                            or error state
+#   STX "0100e101101054" ETX CRLF                            ack of a command
 class ScaleReader
   STX = "\u0002".freeze
   ETX = "\u0003".freeze
@@ -11,30 +17,36 @@ class ScaleReader
   CMD_STREAM_OFF = "#{STX}00FFE10100000#{ETX}\r\n".freeze
   CMD_ZERO = "#{STX}00FFE01050000#{ETX}\r\n".freeze
 
-  # "  0.123 kgT", "-0.004kgT", "- 0.004 kg" → grams (Integer) or nil
-  WEIGHT_PATTERN = /([-+])?\s*(\d+(?:[.,]\d+)?)\s*kg/i.freeze
+  WEIGHT_PATTERN = /([-+])?\s*(\d+(?:[.,]\d+)?)\s*kgT/.freeze
+  NO_WEIGHT_PATTERN = /r010002/.freeze
+
+  MESSAGES = {
+    no_data: 'Váha neposílá data. Zkontrolujte, že je zapnutá a připojená kabelem.',
+    no_weight: 'Váha je pod nulou nebo v chybě a neposílá hmotnost. ' \
+               'Sundejte vše z váhy a odpojte ji na 10 s ze zásuvky.',
+    unstable: 'Váha není ustálená.',
+    negative: 'Váha ukazuje %<grams>d g. Sundejte vše z váhy a vynulujte ji.'
+  }.freeze
 
   Reading = Struct.new(:grams, :at)
 
-  attr_reader :last_line, :last_error, :lines_read
-
-  def initialize(io_factory:, offset_file: nil, window: 5, tolerance: 2,
-                 max_age: 1.5, logger: $stdout)
+  def initialize(io_factory:, window: 5, tolerance: 5, max_age: 1.5, logger: $stdout)
     @io_factory = io_factory
-    @offset_file = offset_file
     @window = window
     @tolerance = tolerance
     @max_age = max_age
     @logger = logger
     @readings = []
+    @no_weight_at = nil
     @mutex = Mutex.new
     @io = nil
     @lines_read = 0
-    @offset = load_offset
   end
 
-  def self.parse_grams(line)
+  # grams (Integer), :no_weight, or nil for frames we do not understand
+  def self.parse(line)
     return nil unless line
+    return :no_weight if line.match?(NO_WEIGHT_PATTERN) && !line.include?('kg')
 
     match = line.match(WEIGHT_PATTERN)
     return nil unless match
@@ -46,7 +58,6 @@ class ScaleReader
 
   def start
     @thread = Thread.new { run_loop }
-    @thread.abort_on_exception = false
     self
   end
 
@@ -58,76 +69,69 @@ class ScaleReader
     nil
   end
 
-  # Returns [:ok, grams] or [:error, message].
-  # Waits up to `timeout` seconds for a fresh, stable window of readings.
+  # Waits up to `timeout` seconds for a fresh, stable weight.
+  # Returns { status: :ok, grams: } or { status: :error, reason:, message: }.
   def weight(timeout: 3.0)
     deadline = monotonic + timeout
     loop do
       state = current_state
-      return [:ok, state[:grams]] if state[:status] == :ok
-      return [:error, state[:message]] if monotonic >= deadline
+      return state if state[:status] == :ok || monotonic >= deadline
 
       sleep 0.05
     end
   end
 
-  # Hardware zero + software zero (offset), so a drifted zero that the
-  # scale refuses to reset is still compensated.
-  def zero!(max_offset: 500)
-    safe_write(CMD_ZERO)
-    sleep 1.0
-    raw = stable_raw_median
-    return [:error, 'Váha není ustálená nebo neposílá data, zkuste to znovu.'] unless raw
-
-    if raw.abs > max_offset
-      return [:error, "Váha ukazuje #{raw} g. Nulovat jde jen prázdnou váhu (do #{max_offset} g)."]
-    end
-
-    @mutex.synchronize { @offset = raw }
-    save_offset(raw)
-    [:ok, raw]
-  end
-
-  def status
-    state = current_state
-    readings = @mutex.synchronize { @readings.dup }
-    {
-      status: state[:status],
-      grams: state[:grams],
-      message: state[:message],
-      offset_grams: @offset,
-      raw_window: readings.map(&:grams),
-      last_reading_age_s: readings.last && (monotonic - readings.last.at).round(2),
-      last_line: @last_line,
-      lines_read: @lines_read,
-      last_error: @last_error
-    }
-  end
-
-  private
-
+  # Current state without waiting (for live display).
   def current_state
-    raw = stable_raw_median
-    readings = @mutex.synchronize { @readings.dup }
+    readings, no_weight_at = @mutex.synchronize { [@readings.last(@window), @no_weight_at] }
+    last_at = [readings.last&.at, no_weight_at].compact.max
 
-    if readings.empty? || monotonic - readings.last.at > @max_age
-      return { status: :error, message: 'Váha neposílá data. Zkontrolujte, že je zapnutá a připojená.' }
-    end
-    return { status: :error, message: 'Váha není ustálená.' } unless raw
+    return error(:no_data) if last_at.nil? || monotonic - last_at > @max_age
+    return error(:no_weight) if no_weight_at && no_weight_at == last_at
 
-    grams = raw - @offset
+    grams = stable_median(readings)
+    return error(:unstable) unless grams
+
     grams = 0 if grams.negative? && grams >= -@tolerance
-
-    if grams.negative?
-      return { status: :error, message: "Váha ukazuje #{grams} g. Sundejte vše z váhy a vynulujte ji (/zero)." }
-    end
+    return error(:negative, grams: grams) if grams.negative?
 
     { status: :ok, grams: grams }
   end
 
-  # Median of the last `window` fresh readings, nil if they are not stable.
-  def stable_raw_median
-    readings = @mutex.synchronize { @readings.last(@window) }
+  # Asks the scale to zero itself and reports whether it then reads ~0.
+  # The scale refuses when the drift is outside its zero range; only a power
+  # cycle with an empty platform resets the zero then.
+  def zero!
+    safe_write(CMD_ZERO)
+    sleep 1.5
+    state = weight(timeout: 2.0)
+    return { status: :ok, grams: 0 } if state[:status] == :ok && state[:grams].zero?
+    return state if state[:status] == :error
+
+    { status: :error, reason: :not_empty,
+      message: "Váha po vynulování ukazuje #{state[:grams]} g. Nulovat jde jen prázdnou váhu." }
+  end
+
+  def status
+    readings, no_weight_at = @mutex.synchronize { [@readings.dup, @no_weight_at] }
+    current_state.merge(
+      raw_window: readings.last(@window).map(&:grams),
+      last_reading_age_s: readings.last && (monotonic - readings.last.at).round(2),
+      no_weight_age_s: no_weight_at && (monotonic - no_weight_at).round(2),
+      last_line: @last_line,
+      lines_read: @lines_read,
+      last_error: @last_error
+    )
+  end
+
+  private
+
+  def error(reason, **values)
+    { status: :error, reason: reason, message: format(MESSAGES.fetch(reason), **values) }
+  end
+
+  # Median of the readings, nil if there are not enough or they differ too much.
+  def stable_median(readings)
     return nil if readings.size < @window
     return nil if monotonic - readings.first.at > @max_age * 2
 
@@ -156,12 +160,12 @@ class ScaleReader
           end
 
           @lines_read += 1
-          @last_line = line.strip
-          grams = self.class.parse_grams(line)
-          next unless grams
+          @last_line = line.delete("\u0002\u0003").strip
+          parsed = self.class.parse(line)
+          next unless parsed
 
           last_data = monotonic
-          push(grams)
+          record(parsed)
         end
       rescue StandardError => e
         @last_error = "#{e.class}: #{e.message}"
@@ -177,10 +181,16 @@ class ScaleReader
     end
   end
 
-  def push(grams)
+  def record(parsed)
     @mutex.synchronize do
-      @readings << Reading.new(grams, monotonic)
-      @readings.shift while @readings.size > 50
+      if parsed == :no_weight
+        @no_weight_at = monotonic
+        @readings.clear
+      else
+        @no_weight_at = nil
+        @readings << Reading.new(parsed, monotonic)
+        @readings.shift while @readings.size > 50
+      end
     end
   end
 
@@ -188,22 +198,6 @@ class ScaleReader
     @io&.write(data)
   rescue StandardError => e
     @last_error = "write: #{e.class}: #{e.message}"
-  end
-
-  def load_offset
-    return 0 unless @offset_file && File.exist?(@offset_file)
-
-    JSON.parse(File.read(@offset_file)).fetch('offset_grams', 0).to_i
-  rescue StandardError
-    0
-  end
-
-  def save_offset(value)
-    return unless @offset_file
-
-    File.write(@offset_file, JSON.generate(offset_grams: value, saved_at: Time.now.to_s))
-  rescue StandardError => e
-    log("cannot save offset: #{e.message}")
   end
 
   def log(message)
@@ -218,7 +212,7 @@ end
 
 # Simulated scale for local development (SCALE_PORT=test).
 class FakeScaleIO
-  def initialize(grams: 1234)
+  def initialize(grams: 1235)
     @grams = grams
   end
 
@@ -226,8 +220,7 @@ class FakeScaleIO
 
   def gets(_sep = nil)
     sleep 0.1
-    kg = (@grams + rand(-1..1)) / 1000.0
-    format("ST,GS  %.3f kgT\r\n", kg)
+    format("\u00020100r01071AW %7.3fkgT   0.000kgS01062\u0003\r\n", @grams / 1000.0)
   end
 
   def close; end
