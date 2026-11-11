@@ -96,10 +96,24 @@ When the `port` variable is set to `'test'`, the server will serve a random inte
 
 11. To access the Scale Server, open a web browser and navigate to `http://squared-scale-pi-1.local:8000/`. You should see an integer displayed in your browser.
 
+## Endpoints
+
+- `GET /` – weight in grams as plain text. `503` with a Czech message when the scale sends no data, is not stable, or shows a negative weight.
+- `GET /zero` (alias `/calibrate`) – with an empty scale: sends the zero command to the scale and stores a software zero offset in `zero_offset.json`. Works even when the scale itself refuses to re-zero because its zero drifted.
+- `GET /status` – JSON for diagnostics (last raw line, readings window, offset, last error).
+
+A background thread keeps the scale in continuous mode and remembers the last readings, so `/` answers immediately. The value is the median of the last 5 readings, only when they differ by at most 4 g.
+
+## Configuration
+
+- `SCALE_PORT` – serial device (default `/dev/ttyUSB0`), `tcp://<ip>:<port>` for the Wi-Fi/Ethernet module, or `test` for a simulated scale.
+- `SCALE_BAUD` (9600), `PORT` (8000), `BIND` (127.0.0.1), `SCALE_OFFSET_FILE`.
+
+Tests: `ruby -I. test_scale_reader.rb`
+
 ## Known issues
 
-1. Sometimes Permission denied for ttyUSB0 occurs, it is necessary to fix permissions for the user running the scaleserver, opt for a permanent solution
-2. If the scale starts with some weight on it, it can then read negative values which breaks the ruby app. In that case, just visit `/calibrate` and reset the scale to correct zero value
+1. Sometimes Permission denied for ttyUSB0 occurs: add the `scale` user to the `dialout` group (`sudo usermod -aG dialout scale`).
 
 ## License
 

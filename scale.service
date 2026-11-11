@@ -6,8 +6,11 @@ After=network.target
 Type=simple
 User=scale
 WorkingDirectory=/home/scale/scaleserver
-ExecStart=/usr/local/bin/bundle exec puma ./scale.rb
+# SCALE_PORT=/dev/ttyUSB0 (default) | tcp://<ip>:<port> (Wi-Fi module) | test
+Environment=SCALE_PORT=/dev/ttyUSB0
+ExecStart=/usr/local/bin/bundle exec ruby scale.rb
 Restart=always
+RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
