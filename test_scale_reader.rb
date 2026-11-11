@@ -89,9 +89,17 @@ class ScaleReaderTest < Minitest::Test
     assert_includes io.writes, ScaleReader::CMD_ZERO
   end
 
-  def test_zero_with_load_is_refused
-    reader, = reader_for([frame(1.0)], repeat_last: true)
+  def test_zero_with_load_is_refused_without_sending_the_command
+    reader, io = reader_for([frame(0.44)], repeat_last: true)
     assert_equal :not_empty, reader.zero![:reason]
+    refute_includes io.writes, ScaleReader::CMD_ZERO
+  end
+
+  def test_zero_fixes_negative_drift
+    reader, io = reader_for([frame(-0.085)], repeat_last: true)
+    sleep 0.1
+    reader.zero!
+    assert_includes io.writes, ScaleReader::CMD_ZERO
   end
 
   def test_reconnects_after_io_error

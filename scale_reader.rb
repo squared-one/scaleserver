@@ -99,9 +99,20 @@ class ScaleReader
   end
 
   # Asks the scale to zero itself and reports whether it then reads ~0.
-  # The scale refuses when the drift is outside its zero range; only a power
-  # cycle with an empty platform resets the zero then.
+  # The scale accepts the zero command even with a load on it (440 g on
+  # 2026-11-11), so refuse here unless it reads at most MAX_ZERO_GRAMS or
+  # a negative drift. When the drift is outside the scale's zero range, only
+  # a power cycle with an empty platform resets the zero.
+  MAX_ZERO_GRAMS = 20
+
   def zero!
+    before = weight(timeout: 2.0)
+    if before[:status] == :ok && before[:grams] > MAX_ZERO_GRAMS
+      return { status: :error, reason: :not_empty,
+               message: "Váha ukazuje #{before[:grams]} g. Nulovat jde jen prázdnou váhu." }
+    end
+    return before if before[:status] == :error && before[:reason] != :negative
+
     safe_write(CMD_ZERO)
     sleep 1.5
     state = weight(timeout: 2.0)
